@@ -51,6 +51,7 @@ import de.pflueger.servotester.ble.WifiConfig
 import de.pflueger.servotester.control.ServoConstants
 import de.pflueger.servotester.control.ServoUiState
 import de.pflueger.servotester.control.ServoViewModel
+import de.pflueger.servotester.update.UpdateState
 
 /** Permissions needed to scan/connect, dependent on API level. */
 private fun requiredBlePermissions(): Array<String> =
@@ -100,6 +101,8 @@ fun SettingsDrawer(vm: ServoViewModel, ui: ServoUiState) {
             MqttSection(vm, ui)
             SectionDivider()
             FirmwareSection(vm, ui)
+            SectionDivider()
+            UpdateSection(vm, ui)
             Spacer(Modifier.height(24.dp))
         }
     }
@@ -519,6 +522,90 @@ private fun UsbProgressLine(text: String) {
     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     Spacer(Modifier.height(4.dp))
     Text(text, style = MaterialTheme.typography.bodySmall)
+}
+
+// ---- Online update --------------------------------------------------------
+
+@Composable
+private fun UpdateSection(vm: ServoViewModel, ui: ServoUiState) {
+    SectionTitle("Online-Update")
+
+    Text(
+        "Installiert: App v${ui.appVersion.ifBlank { "?" }} · " +
+            "Firmware ${ui.fwVersion ?: "— (nicht verbunden)"}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    val checking = ui.update is UpdateState.Checking
+    val downloading = ui.update is UpdateState.Downloading
+    Button(enabled = !checking && !downloading, onClick = vm::checkForUpdates) {
+        Text(if (checking) "Suche …" else "Nach Update suchen")
+    }
+    Spacer(Modifier.height(8.dp))
+
+    when (val st = ui.update) {
+        is UpdateState.Idle -> Text(
+            "Prüft die neueste Version im GitHub-Projekt (Basti77/servotester) und " +
+                "kann App und Firmware direkt von dort aktualisieren.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        is UpdateState.Checking -> LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        is UpdateState.Error -> {
+            Text(st.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(onClick = vm::dismissUpdate) { Text("OK") }
+        }
+        is UpdateState.Notice -> {
+            Text(st.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(onClick = vm::dismissUpdate) { Text("OK") }
+        }
+        is UpdateState.Downloading -> {
+            LinearProgressIndicator(progress = { st.percent / 100f }, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Text("${st.label} lädt … ${st.percent} %", style = MaterialTheme.typography.bodySmall)
+        }
+        is UpdateState.Latest -> {
+            val rel = st.release
+            if (rel == null) {
+                Text(
+                    "Noch kein Release veröffentlicht. Sobald eins mit APK/.bin online ist, " +
+                        "erscheint es hier.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text("Neuestes Release: ${rel.name} (${rel.tag})", fontWeight = FontWeight.Medium)
+                if (rel.notes.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        rel.notes.take(240),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(enabled = rel.firmware != null, onClick = vm::updateFirmwareOnline) {
+                        Text("Firmware")
+                    }
+                    Button(enabled = rel.apk != null, onClick = vm::updateAppOnline) {
+                        Text("App")
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "„Firmware" + "“ lädt die .bin und flasht sie über die aktive BLE-/USB-" +
+                        "Verbindung. „App" + "“ lädt die APK und startet den System-Installer.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 // ---- Small helpers --------------------------------------------------------

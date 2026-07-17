@@ -5,6 +5,10 @@
     <!-- BLE hardware is required for this app to be useful. -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
+    <!-- Online update: fetch releases + download the APK/firmware, then install. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- USB host (OTG) is only needed for the built-in firmware flasher. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
@@ -42,5 +46,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Serves the downloaded APK to the system installer via a content:// URI. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

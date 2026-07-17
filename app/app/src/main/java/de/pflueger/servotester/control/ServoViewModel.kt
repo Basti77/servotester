@@ -13,6 +13,9 @@ import de.pflueger.servotester.ble.WifiConfig
 import kotlinx.coroutines.Dispatchers
 import de.pflueger.servotester.data.AppSettings
 import de.pflueger.servotester.data.SettingsStore
+import de.pflueger.servotester.update.ApkInstaller
+import de.pflueger.servotester.update.UpdateRepository
+import de.pflueger.servotester.update.UpdateState
 import de.pflueger.servotester.usb.UsbControlLink
 import de.pflueger.servotester.usb.UsbFlashState
 import de.pflueger.servotester.usb.UsbFlasher
@@ -43,6 +46,10 @@ data class ServoUiState(
     val usbFwOk: Boolean? = null,
     val usbConnError: String? = null,
     val settings: AppSettings = AppSettings(),
+    /** This app's own version name (for the update screen). */
+    val appVersion: String = "",
+    /** Online-update (GitHub releases) flow state. */
+    val update: UpdateState = UpdateState.Idle,
 )
 
 /**
@@ -58,6 +65,8 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     val ble = BleManager(app)
     private val usbFlasher = UsbFlasher(app)
     private val usbLink = UsbControlLink(app)
+    private val updateRepo = UpdateRepository()
+    private val apkInstaller = ApkInstaller(app)
 
     private val _ui = MutableStateFlow(ServoUiState())
     val ui: StateFlow<ServoUiState> = _ui.asStateFlow()
@@ -71,6 +80,12 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // Our own version name, shown next to the "latest release" on the update screen.
+        _ui.update {
+            it.copy(appVersion = runCatching {
+                app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+            }.getOrDefault(""))
+        }
         // Persisted settings -> UI (limits, presets, mqtt config).
         viewModelScope.launch {
             store.settings.collect { s ->
@@ -222,6 +237,73 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissOta() = ble.resetOta()
+
+    // ---- Online update (GitHub releases) ----------------------------------
+
+    /** Query the repo for the latest published release. */
+    fun checkForUpdates() = viewModelScope.launch {
+        _ui.update { it.copy(update = UpdateState.Checking) }
+        runCatching { updateRepo.fetchLatest() }
+            .onSuccess { rel -> _ui.update { it.copy(update = UpdateState.Latest(rel)) } }
+            .onFailure { e -> _ui.update { it.copy(update = UpdateState.Error(e.message ?: "Update-Prüfung fehlgeschlagen.")) } }
+    }
+
+    /** Download the release firmware .bin and flash it over the live transport. */
+    fun updateFirmwareOnline() = viewModelScope.launch(Dispatchers.IO) {
+        val rel = (_ui.value.update as? UpdateState.Latest)?.release ?: return@launch
+        val asset = rel.firmware ?: run {
+            _ui.update { it.copy(update = UpdateState.Error("Dieses Release enthält keine Firmware-.bin.")) }
+            return@launch
+        }
+        val viaBle = _ui.value.conn == ConnState.CONNECTED
+        val viaUsb = _ui.value.usbConnected
+        if (!viaBle && !viaUsb) {
+            _ui.update { it.copy(update = UpdateState.Error("Erst per BLE oder USB verbinden, dann Firmware aktualisieren.")) }
+            return@launch
+        }
+        val bytes = runCatching {
+            updateRepo.download(asset.url) { pct ->
+                _ui.update { it.copy(update = UpdateState.Downloading("Firmware", pct)) }
+            }
+        }.getOrElse { e ->
+            _ui.update { it.copy(update = UpdateState.Error(e.message ?: "Firmware-Download fehlgeschlagen.")) }
+            return@launch
+        }
+        // Reset the update banner; the existing flash flow (ota / usbFlash) now
+        // drives its own progress UI. BLE-OTA is preferred when both are up.
+        _ui.update { it.copy(update = UpdateState.Latest(rel)) }
+        if (viaBle) {
+            ble.startOta(bytes)
+        } else {
+            usbLink.disconnect()   // the flasher needs the port for itself
+            usbFlasher.flash(bytes)
+        }
+    }
+
+    /** Download the release APK and hand it to the system installer. */
+    fun updateAppOnline() = viewModelScope.launch(Dispatchers.IO) {
+        val rel = (_ui.value.update as? UpdateState.Latest)?.release ?: return@launch
+        val asset = rel.apk ?: run {
+            _ui.update { it.copy(update = UpdateState.Error("Dieses Release enthält keine App-APK.")) }
+            return@launch
+        }
+        val bytes = runCatching {
+            updateRepo.download(asset.url) { pct ->
+                _ui.update { it.copy(update = UpdateState.Downloading("App", pct)) }
+            }
+        }.getOrElse { e ->
+            _ui.update { it.copy(update = UpdateState.Error(e.message ?: "App-Download fehlgeschlagen.")) }
+            return@launch
+        }
+        val err = apkInstaller.install(bytes)
+        _ui.update {
+            it.copy(update = if (err == null)
+                UpdateState.Notice("Installer gestartet — bitte im System-Dialog bestätigen.")
+            else UpdateState.Error(err))
+        }
+    }
+
+    fun dismissUpdate() = _ui.update { it.copy(update = UpdateState.Idle) }
 
     // ---- Firmware flashing over USB-C (works on a factory-fresh ESP32) -----
 
