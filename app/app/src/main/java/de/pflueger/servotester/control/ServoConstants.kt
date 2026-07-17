@@ -35,7 +35,7 @@ object ServoConstants {
      * should take, in ms. Kept in sync with the firmware's authoritative ramp
      * (BLE RATE characteristic / USB "RATE" line). Must match the firmware bounds.
      */
-    const val RAMP_SPAN_MIN_MS = 200
+    const val RAMP_SPAN_MIN_MS = 500   // 0,5 s = schnellster Vollausschlag
     const val RAMP_SPAN_MAX_MS = 5000
     const val RAMP_SPAN_DEFAULT_MS = 2000
 

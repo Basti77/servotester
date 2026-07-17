@@ -78,8 +78,8 @@ static const uint16_t CENTER_US         = 1500;
  */
 // Ramp speed is now user-adjustable (app slider): stored as the time the FULL
 // 700..2300 span should take, in ms. The slew rate follows from it. Bounds keep
-// it sane — 200 ms = brutally fast, 5 s = very gentle. Default 2000 ms (0.8 µs/ms).
-static const uint16_t RAMP_SPAN_MIN_MS = 200;
+// it sane — 500 ms = fastest, 5 s = very gentle. Default 2000 ms (0.8 µs/ms).
+static const uint16_t RAMP_SPAN_MIN_MS = 500;
 static const uint16_t RAMP_SPAN_MAX_MS = 5000;
 static const uint16_t RAMP_SPAN_DEF_MS = 2000;
 static uint16_t       rampSpanMs       = RAMP_SPAN_DEF_MS;
