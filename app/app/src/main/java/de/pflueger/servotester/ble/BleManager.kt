@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
+import de.pflueger.servotester.control.DebugLog
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,7 +59,7 @@ sealed class OtaState {
  * that is the Activity's job, hence @SuppressLint("MissingPermission") here.
  */
 @SuppressLint("MissingPermission")
-class BleManager(private val context: Context) {
+class BleManager(private val context: Context, private val debug: DebugLog) {
 
     private val btManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -93,6 +94,7 @@ class BleManager(private val context: Context) {
     private var mqttChar: BluetoothGattCharacteristic? = null
     private var versionChar: BluetoothGattCharacteristic? = null
     private var rateChar: BluetoothGattCharacteristic? = null
+    private var logChar: BluetoothGattCharacteristic? = null
     private var otaCtrlChar: BluetoothGattCharacteristic? = null
     private var otaDataChar: BluetoothGattCharacteristic? = null
 
@@ -172,7 +174,8 @@ class BleManager(private val context: Context) {
 
     private fun clearChars() {
         pwmChar = null; stateChar = null; wifiChar = null; mqttChar = null
-        versionChar = null; rateChar = null; otaCtrlChar = null; otaDataChar = null
+        versionChar = null; rateChar = null; logChar = null
+        otaCtrlChar = null; otaDataChar = null
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -218,6 +221,7 @@ class BleManager(private val context: Context) {
             mqttChar = svc.getCharacteristic(ServoUuids.MQTT)
             versionChar = svc.getCharacteristic(ServoUuids.VERSION)
             rateChar = svc.getCharacteristic(ServoUuids.RATE)
+            logChar = svc.getCharacteristic(ServoUuids.LOG)
             otaCtrlChar = svc.getCharacteristic(ServoUuids.OTA_CTRL)
             otaDataChar = svc.getCharacteristic(ServoUuids.OTA_DATA)
             _state.value = ConnState.CONNECTED
@@ -231,9 +235,15 @@ class BleManager(private val context: Context) {
         override fun onDescriptorWrite(
             g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int
         ) {
+            // Enable notifications in a fixed chain, one at a time; each char
+            // that a given firmware lacks (LOG only exists ≥ 1.3.0) is skipped.
             when (descriptor.characteristic.uuid) {
                 ServoUuids.STATE -> pwmChar?.let { enableNotifications(g, it) }
-                ServoUuids.PWM ->
+                    ?: logChar?.let { enableNotifications(g, it) }
+                    ?: otaCtrlChar?.let { enableNotifications(g, it) } ?: readVersion(g)
+                ServoUuids.PWM -> logChar?.let { enableNotifications(g, it) }
+                    ?: otaCtrlChar?.let { enableNotifications(g, it) } ?: readVersion(g)
+                ServoUuids.LOG ->
                     otaCtrlChar?.let { enableNotifications(g, it) } ?: readVersion(g)
                 ServoUuids.OTA_CTRL -> readVersion(g)
             }
@@ -308,11 +318,16 @@ class BleManager(private val context: Context) {
     private fun handleNotification(uuid: java.util.UUID, value: ByteArray) {
         when (uuid) {
             ServoUuids.PWM -> if (value.size >= 2) {
-                _remotePwm.value = (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
+                val v = (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
+                _remotePwm.value = v
+                debug.rx("BLE", "PWM $v")
             }
             ServoUuids.STATE -> if (value.isNotEmpty()) {
-                _remoteOutputOn.value = value[0].toInt() != 0
+                val on = value[0].toInt() != 0
+                _remoteOutputOn.value = on
+                debug.rx("BLE", "OUT ${if (on) 1 else 0}")
             }
+            ServoUuids.LOG -> debug.info("ESP", value.toString(Charsets.UTF_8))
             ServoUuids.OTA_CTRL -> otaCtrlEvents.trySend(value)
         }
     }
@@ -333,21 +348,32 @@ class BleManager(private val context: Context) {
 
     // ---- Writes -----------------------------------------------------------
 
-    /** Fast, fire-and-forget PWM target (uint16 LE). Dropped silently if busy. */
-    fun writePwm(valueUs: Int) {
+    /**
+     * PWM target (uint16 LE). The jogdial stream uses [reliable] = false
+     * (write-without-response: a dropped frame is fine, the next tick is fresher).
+     * Discrete moves (preset/center) pass [reliable] = true so a single lost
+     * command can't leave the servo sitting on the old target — the acked write
+     * is far less likely to vanish, and the ViewModel resync watchdog covers
+     * whatever still slips through.
+     */
+    fun writePwm(valueUs: Int, reliable: Boolean = false) {
         if (otaBusy()) return   // don't interleave with the firmware upload
         val g = gatt ?: return
         val ch = pwmChar ?: return
         val v = valueUs and 0xFFFF
         val bytes = byteArrayOf((v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte())
-        writeChar(g, ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+        val type = if (reliable) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                   else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        val ok = writeChar(g, ch, bytes, type)
+        debug.tx("BLE", "PWM $v${if (reliable) " (rel)" else ""}${if (ok) "" else " ✗busy"}")
     }
 
     /** Reliable output ON/OFF (uint8). */
     fun writeState(on: Boolean) {
         val g = gatt ?: return
         val ch = stateChar ?: return
-        writeChar(g, ch, byteArrayOf(if (on) 1 else 0), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        val ok = writeChar(g, ch, byteArrayOf(if (on) 1 else 0), BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        debug.tx("BLE", "OUT ${if (on) 1 else 0}${if (ok) "" else " ✗busy"}")
     }
 
     /** Reliable ramp-speed = full-span time in ms (uint16 LE). No-op on old firmware. */
@@ -357,6 +383,7 @@ class BleManager(private val context: Context) {
         val v = spanMs and 0xFFFF
         writeChar(g, ch, byteArrayOf((v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte()),
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        debug.tx("BLE", "RATE $v")
     }
 
     fun writeWifi(config: WifiConfig) {

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbManager
 import androidx.core.content.ContextCompat
+import de.pflueger.servotester.control.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,7 +34,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * mirroring the BLE manager's "a stale ramp value is worthless" philosophy —
  * the next 20-ms tick brings a fresher one anyway.
  */
-class UsbControlLink(private val context: Context) {
+class UsbControlLink(private val context: Context, private val debug: DebugLog) {
 
     private val usb = UsbAccess.manager(context)
 
@@ -146,7 +147,10 @@ class UsbControlLink(private val context: Context) {
 
     fun writeRampSpan(spanMs: Int) { if (_connected.value) send("RATE $spanMs") }
 
-    private fun send(line: String) { txQueue.trySend(line) }
+    private fun send(line: String) {
+        val queued = txQueue.trySend(line).isSuccess
+        debug.tx("USB", line + if (queued) "" else " ✗voll")
+    }
 
     // ---- Incoming lines -----------------------------------------------------
 
@@ -172,11 +176,22 @@ class UsbControlLink(private val context: Context) {
 
     private fun handleLine(line: String) {
         when {
-            line.startsWith("PWM ") -> line.substring(4).trim().toIntOrNull()?.let {
-                _remotePwm.value = it
+            line.startsWith("PWM ") -> {
+                line.substring(4).trim().toIntOrNull()?.let { _remotePwm.value = it }
+                debug.rx("USB", line)
             }
-            line.startsWith("OUT ") -> _remoteOutputOn.value = line.substring(4).trim() == "1"
-            line.startsWith("FW ") -> _fwVersion.value = line.substring(3).trim()
+            line.startsWith("OUT ") -> {
+                _remoteOutputOn.value = line.substring(4).trim() == "1"
+                debug.rx("USB", line)
+            }
+            line.startsWith("FW ") -> {
+                _fwVersion.value = line.substring(3).trim()
+                debug.rx("USB", line)
+            }
+            line.startsWith("RATE ") -> debug.rx("USB", line)
+            // Everything else is firmware log output (e.g. "[dbg] …", "[ble] …")
+            // sharing the port — surface it in the console instead of dropping it.
+            else -> debug.info("ESP", line)
         }
     }
 }

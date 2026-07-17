@@ -19,8 +19,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +42,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,24 +70,57 @@ fun ServoScreen(vm: ServoViewModel) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
+    // Console is a swap-in view of the same screen (the "Reiter"), only reachable
+    // once enabled in the settings. Auto-close it if the setting gets turned off.
+    var showConsole by remember { mutableStateOf(false) }
+    if (!ui.settings.consoleEnabled && showConsole) showConsole = false
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = { SettingsDrawer(vm, ui) },
     ) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = { Text("ServoTester") },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Filled.Menu, contentDescription = "Einstellungen")
-                        }
-                    },
-                    actions = { ConnectionBadge(ui) },
-                )
+                if (showConsole) {
+                    TopAppBar(
+                        title = { Text("Konsole") },
+                        navigationIcon = {
+                            IconButton(onClick = { showConsole = false }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurück")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = vm::clearDebug) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Leeren")
+                            }
+                        },
+                    )
+                } else {
+                    TopAppBar(
+                        title = { Text("ServoTester") },
+                        navigationIcon = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Filled.Menu, contentDescription = "Einstellungen")
+                            }
+                        },
+                        actions = {
+                            ConnectionBadge(ui)
+                            if (ui.settings.consoleEnabled) {
+                                IconButton(onClick = { showConsole = true }) {
+                                    Icon(Icons.Filled.Terminal, contentDescription = "Konsole")
+                                }
+                            }
+                        },
+                    )
+                }
             }
         ) { inner ->
-            ServoContent(vm, ui, inner)
+            if (showConsole) {
+                val entries by vm.debugEntries.collectAsStateWithLifecycle()
+                ConsoleContent(entries, inner)
+            } else {
+                ServoContent(vm, ui, inner)
+            }
         }
     }
 }

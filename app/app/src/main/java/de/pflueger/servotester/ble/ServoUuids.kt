@@ -32,6 +32,8 @@ object ServoUuids {
     val VERSION: UUID = UUID.fromString("b1a70005-5c4d-4b8e-9f10-2a3b4c5d6e7f")
     /** Ramp speed: uint16 LE = time for the full 700..2300 span, in ms (read / write). */
     val RATE: UUID = UUID.fromString("b1a70006-5c4d-4b8e-9f10-2a3b4c5d6e7f")
+    /** Debug/phase log stream from the firmware (notify-only, UTF-8 lines) — feeds the app console. */
+    val LOG: UUID = UUID.fromString("b1a70007-5c4d-4b8e-9f10-2a3b4c5d6e7f")
     val OTA_CTRL: UUID = UUID.fromString("b1a70010-5c4d-4b8e-9f10-2a3b4c5d6e7f")
     val OTA_DATA: UUID = UUID.fromString("b1a70011-5c4d-4b8e-9f10-2a3b4c5d6e7f")
 

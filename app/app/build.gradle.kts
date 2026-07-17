@@ -12,8 +12,8 @@ android {
         applicationId = "de.pflueger.servotester"
         minSdk = 26          // BLE + runtime permissions; API 31+ path handled separately
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"   // 1.4: fw handshake; 1.5: speed slider + online update; 1.6: dial folgt Servo (Sync) + klare Netzfehler
+        versionCode = 8
+        versionName = "1.7"   // 1.4: fw handshake; 1.5: speed slider + online update; 1.6: dial folgt Servo (Sync) + klare Netzfehler; 1.7: Debug-Konsole + Auto-Resync
         vectorDrawables { useSupportLibrary = true }
     }
 

@@ -30,6 +30,8 @@ data class AppSettings(
     val mqttPort: Int = 1883,
     val mqttUser: String = "",
     val mqttPass: String = "",
+    /** Show the developer console tab (raw TX/RX + firmware phase log). */
+    val consoleEnabled: Boolean = false,
 )
 
 /**
@@ -57,7 +59,12 @@ class SettingsStore(private val context: Context) {
             mqttPort = p[MQTT_PORT] ?: 1883,
             mqttUser = p[MQTT_USER] ?: "",
             mqttPass = p[MQTT_PASS] ?: "",
+            consoleEnabled = p[CONSOLE_ON] ?: false,
         )
+    }
+
+    suspend fun setConsoleEnabled(on: Boolean) {
+        context.dataStore.edit { it[CONSOLE_ON] = on }
     }
 
     suspend fun setLimits(min: Int, max: Int) {
@@ -113,6 +120,7 @@ class SettingsStore(private val context: Context) {
         val MQTT_PORT = intPreferencesKey("mqtt_port")
         val MQTT_USER = stringPreferencesKey("mqtt_user")
         val MQTT_PASS = stringPreferencesKey("mqtt_pass")
+        val CONSOLE_ON = booleanPreferencesKey("console_enabled")
 
         fun presetKey(index: Int) = when (index) {
             0 -> PRESET0; 1 -> PRESET1; 2 -> PRESET2; 3 -> PRESET3; else -> null

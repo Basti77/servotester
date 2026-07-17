@@ -103,6 +103,8 @@ fun SettingsDrawer(vm: ServoViewModel, ui: ServoUiState) {
             FirmwareSection(vm, ui)
             SectionDivider()
             UpdateSection(vm, ui)
+            SectionDivider()
+            ConsoleSection(vm, ui)
             Spacer(Modifier.height(24.dp))
         }
     }
@@ -606,6 +608,28 @@ private fun UpdateSection(vm: ServoViewModel, ui: ServoUiState) {
             }
         }
     }
+}
+
+// ---- Developer console -----------------------------------------------------
+
+@Composable
+private fun ConsoleSection(vm: ServoViewModel, ui: ServoUiState) {
+    SectionTitle("Konsole (Entwickler)")
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+        Switch(
+            checked = ui.settings.consoleEnabled,
+            onCheckedChange = { vm.setConsoleEnabled(it) },
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(if (ui.settings.consoleEnabled) "Konsole aktiv" else "Konsole aus")
+    }
+    Text(
+        "Blendet oben rechts einen Konsolen-Reiter ein: zeigt gesendete Befehle (TX), " +
+            "Rückmeldungen des ESP (RX) und die Firmware-Phasen (ab FW 1.3.0 auch per " +
+            "Bluetooth). Hilft, hängende Steuerung zu diagnostizieren.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 // ---- Small helpers --------------------------------------------------------

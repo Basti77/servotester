@@ -11,6 +11,7 @@ import de.pflueger.servotester.ble.OtaState
 import de.pflueger.servotester.ble.ScannedDevice
 import de.pflueger.servotester.ble.WifiConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import de.pflueger.servotester.data.AppSettings
 import de.pflueger.servotester.data.SettingsStore
 import de.pflueger.servotester.update.ApkInstaller
@@ -62,9 +63,14 @@ data class ServoUiState(
 class ServoViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = SettingsStore(app)
-    val ble = BleManager(app)
+
+    /** Shared console log; every transport and the resync watchdog write here. */
+    val debug = DebugLog()
+    val debugEntries get() = debug.entries
+
+    val ble = BleManager(app, debug)
     private val usbFlasher = UsbFlasher(app)
-    private val usbLink = UsbControlLink(app)
+    private val usbLink = UsbControlLink(app, debug)
     private val updateRepo = UpdateRepository()
     private val apkInstaller = ApkInstaller(app)
 
@@ -75,6 +81,16 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     // the target and mirrors the position the ESP reports back — so the dial can
     // never run ahead of the real servo (no double-ramp desync). See moveTo() and
     // the remotePwm collector below.
+
+    // Resync watchdog state: a discrete command (preset/center/toggle) is a single
+    // packet; write-without-response can drop it silently and nothing re-sends it,
+    // which strands the servo on the old target while the app thinks it moved. The
+    // watchdog re-issues a command whose effect never showed up. Counters bound the
+    // retries so a genuinely unreachable target can't loop forever.
+    private var pwmResyncLeft = 0
+    private var outResyncLeft = 0
+    private var lastRemoteForResync: Int? = null
+    private var stallChecks = 0
 
     init {
         // Our own version name, shown next to the "latest release" on the update screen.
@@ -145,6 +161,42 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { ble.ota.collect { o -> _ui.update { it.copy(ota = o) } } }
         viewModelScope.launch { usbFlasher.state.collect { u -> _ui.update { it.copy(usbFlash = u) } } }
         viewModelScope.launch { usbLink.fwResponded.collect { ok -> _ui.update { it.copy(usbFwOk = ok) } } }
+
+        // Resync watchdog: catches a dropped discrete command by re-sending it once
+        // its effect fails to appear. See the counters above for why this exists.
+        viewModelScope.launch {
+            while (true) {
+                delay(RESYNC_POLL_MS)
+                val st = _ui.value
+                val connected = st.conn == ConnState.CONNECTED || st.usbConnected
+                if (!connected) { pwmResyncLeft = 0; outResyncLeft = 0; lastRemoteForResync = null; continue }
+
+                // Lost OUT toggle: the ESP reports an output state we didn't intend.
+                val ro = st.remoteOutputOn
+                if (ro != null && ro != st.outputOn && outResyncLeft > 0) {
+                    outResyncLeft--
+                    debug.info("resync", "Ausgang ${if (st.outputOn) "AN" else "AUS"} erneut senden (ESP: ${if (ro) "AN" else "AUS"})")
+                    ble.writeState(st.outputOn); usbLink.writeState(st.outputOn)
+                }
+
+                // Lost PWM target: the servo is neither at the target nor moving
+                // toward it (Ist unchanged across two polls) -> the target packet
+                // was almost certainly dropped. Re-send it.
+                val remote = st.remotePwm
+                if (remote != null && remote != st.target) {
+                    if (remote == lastRemoteForResync) {
+                        stallChecks++
+                        if (stallChecks >= 2 && pwmResyncLeft > 0) {
+                            pwmResyncLeft--
+                            stallChecks = 0
+                            debug.info("resync", "Ziel ${st.target} erneut senden (Ist steht bei $remote)")
+                            ble.writePwm(st.target, reliable = true); usbLink.writePwm(st.target)
+                        }
+                    } else stallChecks = 0
+                } else stallChecks = 0
+                lastRemoteForResync = remote
+            }
+        }
     }
 
     // ---- Value control ----------------------------------------------------
@@ -163,7 +215,7 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
      * not silently retarget a dead output. Internal re-clamps (e.g. after a limit
      * change) pass arm=false so they never start the servo on their own.
      */
-    private fun moveTo(value: Int, arm: Boolean) {
+    private fun moveTo(value: Int, arm: Boolean, stream: Boolean) {
         val v = clampToLimits(value)
         val armNow = arm && !_ui.value.outputOn
         val connected = _ui.value.conn == ConnState.CONNECTED || _ui.value.usbConnected
@@ -176,22 +228,27 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
                 display = if (connected) it.display else v,
             )
         }
-        if (armNow) { ble.writeState(true); usbLink.writeState(true) }
-        ble.writePwm(v)
+        if (armNow) { ble.writeState(true); usbLink.writeState(true); outResyncLeft = RESYNC_TRIES }
+        // Discrete moves get the acked BLE write; the jogdial stream stays
+        // write-without-response. Either way, arm the resync watchdog so a lost
+        // command doesn't strand the servo.
+        ble.writePwm(v, reliable = !stream)
         usbLink.writePwm(v)
+        pwmResyncLeft = RESYNC_TRIES
+        stallChecks = 0
     }
 
     /** Called continuously while the user drags the jogdial. */
-    fun onJogTo(value: Int) = moveTo(value, arm = true)
+    fun onJogTo(value: Int) = moveTo(value, arm = true, stream = true)
 
     /** Quick-select preset (also respects the limits). */
     fun onPreset(index: Int) {
         val raw = _ui.value.presets.getOrNull(index) ?: return
-        moveTo(raw, arm = true)
+        moveTo(raw, arm = true, stream = false)
     }
 
     /** Center button -> 1500 µs (clamped into limits in case they exclude center). */
-    fun onCenter() = moveTo(ServoConstants.CENTER_US, arm = true)
+    fun onCenter() = moveTo(ServoConstants.CENTER_US, arm = true, stream = false)
 
     /** Ramp-speed slider: full-span time in ms. Pushed to the ESP (which ramps). */
     fun setRampSpan(ms: Int) {
@@ -206,7 +263,14 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(outputOn = next) }
         ble.writeState(next)
         usbLink.writeState(next)
+        outResyncLeft = RESYNC_TRIES
     }
+
+    // ---- Debug console ----------------------------------------------------
+
+    fun setConsoleEnabled(on: Boolean) = viewModelScope.launch { store.setConsoleEnabled(on) }
+
+    fun clearDebug() = debug.clear()
 
     // ---- Settings persistence --------------------------------------------
 
@@ -214,7 +278,7 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         store.setLimits(min, max)
         // Re-clamp the current target into the new window immediately — but never
         // arm the output just because the limits changed.
-        moveTo(_ui.value.target, arm = false)
+        moveTo(_ui.value.target, arm = false, stream = false)
     }
 
     fun savePreset(index: Int, value: Int) = viewModelScope.launch { store.setPreset(index, value) }
@@ -360,5 +424,12 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         ble.disconnect()
         usbLink.disconnect()
         super.onCleared()
+    }
+
+    private companion object {
+        /** Watchdog poll interval; two stable polls (~700 ms) confirm a stall. */
+        const val RESYNC_POLL_MS = 350L
+        /** Max automatic re-sends of one dropped command before giving up. */
+        const val RESYNC_TRIES = 3
     }
 }

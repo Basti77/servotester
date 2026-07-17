@@ -34,6 +34,8 @@
  *  b1a70003  WIFI     W              JSON {ssid,pass,static,ip,gw,mask,dns}
  *  b1a70004  MQTT     W              JSON {enabled,host,port,user,pass}
  *  b1a70005  VERSION  R              UTF-8 firmware version string
+ *  b1a70006  RATE     R/W            uint16 LE ramp full-span time in ms
+ *  b1a70007  LOG      Notify         UTF-8 debug line (app console), see dbg()
  *  b1a70010  OTA_CTRL W/Notify       see OTA protocol below
  *  b1a70011  OTA_DATA W-NR           raw firmware chunk
  *
@@ -54,10 +56,11 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <esp_wifi.h>
+#include <stdarg.h>
 
 // ---- Identity ---------------------------------------------------------
 
-static const char *FW_VERSION = "1.2.0";
+static const char *FW_VERSION = "1.3.0";
 static const char *BLE_NAME   = "ServoTester";
 
 // ---- Servo domain (keep in sync with app ServoConstants.kt) ------------
@@ -102,6 +105,7 @@ static const char *UUID_WIFI     = "b1a70003" UUID_SUFFIX;
 static const char *UUID_MQTT     = "b1a70004" UUID_SUFFIX;
 static const char *UUID_VERSION  = "b1a70005" UUID_SUFFIX;
 static const char *UUID_RATE     = "b1a70006" UUID_SUFFIX;
+static const char *UUID_LOG      = "b1a70007" UUID_SUFFIX;
 static const char *UUID_OTA_CTRL = "b1a70010" UUID_SUFFIX;
 static const char *UUID_OTA_DATA = "b1a70011" UUID_SUFFIX;
 
@@ -122,7 +126,12 @@ static volatile bool     outputOn  = false;      // silent until enabled
 static NimBLECharacteristic *chPwm     = nullptr;
 static NimBLECharacteristic *chState   = nullptr;
 static NimBLECharacteristic *chRate    = nullptr;
+static NimBLECharacteristic *chLog     = nullptr;
 static NimBLECharacteristic *chOtaCtrl = nullptr;
+
+// True while a BLE central is connected — gates debug notifies so we never push
+// into the void (and never fight the OTA transfer).
+static volatile bool bleClientConnected = false;
 
 // Flags set from BLE callbacks, handled in loop() (keep callbacks short).
 static volatile bool wifiConfigDirty = false;
@@ -219,6 +228,31 @@ static void publishMqttState(bool pwmToo, bool outputToo) {
   if (outputToo) mqtt.publish(T_STAT_OUTPUT, outputOn ? "1" : "0", true);
 }
 
+// ---- Debug / phase log ----------------------------------------------------
+
+/*
+ * One printf-style log sink feeding BOTH channels the app's console reads:
+ *  - USB: printed as a plain line (the app treats unknown serial lines as log),
+ *  - BLE: pushed over the LOG characteristic as a Notify so the console works
+ *    wirelessly too. Gated on a live central and suppressed during OTA so the
+ *    firmware upload never has to share the air with chatter.
+ * Keep messages short — one BLE notify, no fragmentation.
+ */
+static void dbg(const char *fmt, ...) {
+  char buf[96];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  size_t len = (n < (int)sizeof(buf) - 1) ? (size_t)n : sizeof(buf) - 1;
+  if (Serial) Serial.printf("[dbg] %s\n", buf);
+  if (chLog && bleClientConnected && !otaActive) {
+    chLog->setValue((uint8_t *)buf, len);
+    chLog->notify();
+  }
+}
+
 // ---- Ramp ("Smooth Transit", authoritative here) --------------------------
 
 static void rampTick() {
@@ -246,23 +280,27 @@ static void rampTick() {
     lastNotified = cur;
     lastNotifyMs = now;
     notifyPwm(cur);
-    if (arrived) publishMqttState(true, false);
+    if (arrived) { publishMqttState(true, false); dbg("ramp arrived %u", (unsigned)cur); }
   }
 }
 
 static void setTarget(int us) {
   uint16_t v = clampUs(us);
-  if (v == targetUs) return;
+  if (v != us) dbg("rx PWM %d -> clamp %u", us, (unsigned)v);
+  if (v == targetUs) { dbg("rx PWM %u (schon Ziel)", (unsigned)v); return; }
+  dbg("rx PWM %u (Ziel war %u)%s", (unsigned)v, (unsigned)targetUs,
+      outputOn ? "" : " [Ausgang AUS]");
   targetUs = v;
   markServoDirty();
 }
 
 static void setOutput(bool on) {
-  if (outputOn == on) return;
+  if (outputOn == on) { dbg("rx OUT %d (unverändert)", on ? 1 : 0); return; }
   outputOn = on;
   applyPwm();
   notifyState();
   publishMqttState(false, true);
+  dbg("Ausgang %s @ %u µs", on ? "AN" : "AUS", (unsigned)lroundf(currentUs));
   markServoDirty();
 }
 
@@ -272,6 +310,7 @@ static void setRampSpan(int ms) {
   rampSpanMs = v;
   if (chRate) { uint8_t b[2] = { (uint8_t)(v & 0xFF), (uint8_t)(v >> 8) }; chRate->setValue(b, 2); }
   if (Serial) Serial.printf("RATE %u\n", (unsigned)v);
+  dbg("Tempo %u ms Vollausschlag", (unsigned)v);
   markServoDirty();
 }
 
@@ -466,12 +505,16 @@ static void serialTick() {
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *, NimBLEConnInfo &info) override {
     Serial.printf("[ble] connected: %s\n", info.getAddress().toString().c_str());
+    bleClientConnected = true;
     // Push the current state so the app syncs immediately.
     notifyState();
     notifyPwm((uint16_t)lroundf(currentUs));
+    dbg("BLE verbunden — Ziel %u, Ist %u, Ausgang %s", (unsigned)targetUs,
+        (unsigned)lroundf(currentUs), outputOn ? "AN" : "AUS");
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
     Serial.printf("[ble] disconnected (reason %d)\n", reason);
+    bleClientConnected = false;
     if (otaActive) {              // half-finished upload is worthless
       Update.abort();
       otaActive = false;
@@ -640,6 +683,9 @@ static void bleSetup() {
   { uint8_t b[2] = { (uint8_t)(rampSpanMs & 0xFF), (uint8_t)(rampSpanMs >> 8) };
     chRate->setValue(b, 2); }
 
+  // Debug/phase log stream for the app console (notify-only, no write back).
+  chLog = svc->createCharacteristic(UUID_LOG, NIMBLE_PROPERTY::NOTIFY);
+
   chOtaCtrl = svc->createCharacteristic(
       UUID_OTA_CTRL, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
   chOtaCtrl->setCallbacks(new OtaCtrlCallbacks());
@@ -676,6 +722,8 @@ void setup() {
   loadServoState();
   applyPwm();        // drive the restored position immediately if output was on
   bleSetup();        // advertises the restored values via chPwm/chState
+  dbg("Boot FW %s — Ist %u µs, Ausgang %s, Tempo %u ms", FW_VERSION,
+      (unsigned)targetUs, outputOn ? "AN" : "AUS", (unsigned)rampSpanMs);
 
   if (!wifiCfg.ssid.isEmpty()) wifiConnect();
   lastWifiAttemptMs = millis();
