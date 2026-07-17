@@ -13,6 +13,30 @@ installieren" für den Browser/die Dateien-App erlauben, falls Android nachfragt
 > Der Link zeigt immer auf das **neueste Release**. Er funktioniert, sobald ein
 > Release mit dem Asset-Namen `app-debug.apk` veröffentlicht ist.
 
+## 🔌 Hardware & Anschluss
+
+Die Firmware ist für ein **ESP32-C3** ausgelegt (entwickelt/getestet auf einem
+**ESP32-C3 SuperMini**). Andere ESP32-Varianten passen **nicht** ohne Anpassung —
+Board-Auswahl und USB-Serial/JTAG-Einstellungen sind auf den C3 zugeschnitten.
+
+**Das Servo-Signal liegt auf `GPIO 2`.** Dort wird die Signalleitung des Servos
+angeschlossen:
+
+| Servo | ESP32-C3 |
+|---|---|
+| Signal (meist orange/weiß) | **GPIO 2** |
+| GND (meist braun/schwarz) | GND (**gemeinsame Masse mit der Servo-Stromversorgung**) |
+| + (meist rot) | **5 V vom externen BEC/Netzteil — NICHT aus dem ESP32** |
+
+Wichtig: Den Servo über eine **eigene 5-V-Quelle** (BEC/Netzteil) versorgen, nicht
+über den ESP32 — der 3,3-V-Regler des Boards liefert nicht genug Strom. GND von
+Servo-Versorgung und ESP32 müssen **verbunden** sein, sonst kommt kein sauberes
+Signal an.
+
+> Der Signal-Pin ist in der Firmware zentral als `SERVO_PIN` (`= 2`) definiert
+> (`firmware/ServoTester/ServoTester.ino`) — dort ggf. auf einen anderen freien
+> GPIO ändern.
+
 ## Aufbau
 
 Monorepo:
