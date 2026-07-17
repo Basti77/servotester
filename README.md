@@ -1,7 +1,21 @@
 # ServoTester
 
 Smarter Servotester mit erweitertem Impulsbereich **700–2300 µs** — ESP32-C3-Firmware
-plus Android-App (BLE + USB-C). Monorepo:
+plus Android-App (BLE + USB-C).
+
+## 📥 App herunterladen
+
+**[➡️ ServoTester-App (APK) — neueste Version herunterladen](https://github.com/Basti77/servotester/releases/latest/download/app-debug.apk)**
+
+Direkter Download der aktuellen Android-App. Danach im Handy „Unbekannte Apps
+installieren" für den Browser/die Dateien-App erlauben, falls Android nachfragt.
+
+> Der Link zeigt immer auf das **neueste Release**. Er funktioniert, sobald ein
+> Release mit dem Asset-Namen `app-debug.apk` veröffentlicht ist.
+
+## Aufbau
+
+Monorepo:
 
 ```
 servotester/
