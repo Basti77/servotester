@@ -1,0 +1,7 @@
+<resources>
+    <!-- Dark launch-window theme. Compose handles the in-app dark colours. -->
+    <style name="Theme.ServoTester" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

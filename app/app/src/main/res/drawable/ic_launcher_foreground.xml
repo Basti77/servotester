@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Jogdial ring -->
+    <path
+        android:strokeColor="#4FC3F7"
+        android:strokeWidth="5"
+        android:fillColor="#00000000"
+        android:pathData="M54,30 a24,24 0 1,0 0.01,0" />
+    <!-- Pointer indicator at top -->
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M54,26 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+    <!-- Center dot (toggle) -->
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M54,54 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
+</vector>

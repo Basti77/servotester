@@ -1,0 +1,8 @@
+<resources>
+    <!-- Base (light) application theme. The actual UI colours are driven by Compose /
+         Material3 dynamic colour; this platform theme only styles the launch window. -->
+    <style name="Theme.ServoTester" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
