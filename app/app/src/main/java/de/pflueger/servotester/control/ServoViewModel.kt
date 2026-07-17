@@ -55,9 +55,9 @@ data class ServoUiState(
 /**
  * Orchestrates the servo control surface:
  *  - clamps every requested value into the user's software limits (§3.2),
- *  - routes it through the [RampController] (Smooth Transit),
- *  - streams each ramped value to the ESP32 over BLE,
- *  - mirrors the ESP's reported "Ist" values back into the UI.
+ *  - sends it as the target to the ESP32 (which runs the authoritative ramp),
+ *  - mirrors the ESP's reported "Ist" position back onto the dial, so the
+ *    readout stays in lockstep with the real servo (no app-side second ramp).
  */
 class ServoViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -71,13 +71,10 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(ServoUiState())
     val ui: StateFlow<ServoUiState> = _ui.asStateFlow()
 
-    // The ramp pushes each intermediate value here: update the dial AND the
-    // ESP — over whichever transport is up (each no-ops when disconnected).
-    private val ramp = RampController(viewModelScope) { value ->
-        _ui.update { it.copy(display = value) }
-        ble.writePwm(value)
-        usbLink.writePwm(value)
-    }
+    // Ramping is done ONCE, authoritatively, in the firmware. The app only sends
+    // the target and mirrors the position the ESP reports back — so the dial can
+    // never run ahead of the real servo (no double-ramp desync). See moveTo() and
+    // the remotePwm collector below.
 
     init {
         // Our own version name, shown next to the "latest release" on the update screen.
@@ -89,8 +86,6 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         // Persisted settings -> UI (limits, presets, mqtt config).
         viewModelScope.launch {
             store.settings.collect { s ->
-                // Keep the app-side ramp in step with the persisted speed.
-                ramp.ratePerMs = ServoConstants.rateForSpan(s.rampSpanMs)
                 _ui.update {
                     it.copy(
                         settings = s,
@@ -121,18 +116,20 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         // also covers MQTT-driven changes reported back by the firmware).
         viewModelScope.launch {
             combine(ble.remotePwm, usbLink.remotePwm) { b, u -> b ?: u }.collect { p ->
-                _ui.update { it.copy(remotePwm = p) }
-                // Align the ramp base to what the firmware reports, so we don't ramp
-                // from a stale assumed position (first sync after connecting, or an
-                // external MQTT-driven change). BUT: while our own ramp is running,
-                // these notifies are just echoes of the values we just wrote — adopting
-                // them would cancel the ramp mid-flight and strand the servo partway.
-                if (p != null && !ramp.isRamping &&
-                    (_ui.value.conn == ConnState.CONNECTED || _ui.value.usbConnected)) {
-                    ramp.syncTo(p)
-                    // Reflect the true position on the dial too, so it doesn't sit
-                    // on a stale default until the user drags it.
-                    _ui.update { it.copy(target = p, display = p) }
+                _ui.update { st ->
+                    val connected = st.conn == ConnState.CONNECTED || st.usbConnected
+                    if (p == null || !connected) return@update st.copy(remotePwm = p)
+                    // The dial ALWAYS shows the position the ESP reports — that's the
+                    // real servo, so display can't outrun it. Adopt it as the target
+                    // too only when we were settled (display==target): that means this
+                    // change came from outside (connect sync / MQTT), not from a move
+                    // we started — during our own move the target must stay the goal.
+                    val wasSettled = st.display == st.target
+                    st.copy(
+                        remotePwm = p,
+                        display = p,
+                        target = if (wasSettled) p else st.target,
+                    )
                 }
             }
         }
@@ -157,7 +154,9 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         value.coerceIn(_ui.value.minLimit, _ui.value.maxLimit)
 
     /**
-     * Move the servo to [value] (clamped to limits) and ramp there.
+     * Send [value] (clamped) as the new target. The firmware runs the ramp and
+     * reports its live position back, which drives the dial — so the readout is
+     * always in step with the actual servo, never ahead of it.
      *
      * When [arm] is set, a user-initiated move auto-enables the output if it was
      * off — pressing a preset or grabbing the jogdial should make the servo react,
@@ -166,14 +165,20 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun moveTo(value: Int, arm: Boolean) {
         val v = clampToLimits(value)
-        if (arm && !_ui.value.outputOn) {
-            _ui.update { it.copy(target = v, outputOn = true) }
-            ble.writeState(true)
-            usbLink.writeState(true)
-        } else {
-            _ui.update { it.copy(target = v) }
+        val armNow = arm && !_ui.value.outputOn
+        val connected = _ui.value.conn == ConnState.CONNECTED || _ui.value.usbConnected
+        _ui.update {
+            it.copy(
+                target = v,
+                outputOn = if (armNow) true else it.outputOn,
+                // Connected: the dial follows the ESP's reported position (below).
+                // Offline: nothing reports back, so track the requested value.
+                display = if (connected) it.display else v,
+            )
         }
-        ramp.setTarget(v)
+        if (armNow) { ble.writeState(true); usbLink.writeState(true) }
+        ble.writePwm(v)
+        usbLink.writePwm(v)
     }
 
     /** Called continuously while the user drags the jogdial. */
@@ -188,10 +193,9 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     /** Center button -> 1500 µs (clamped into limits in case they exclude center). */
     fun onCenter() = moveTo(ServoConstants.CENTER_US, arm = true)
 
-    /** Ramp-speed slider: full-span time in ms. Applied locally + pushed to the ESP. */
+    /** Ramp-speed slider: full-span time in ms. Pushed to the ESP (which ramps). */
     fun setRampSpan(ms: Int) {
         val v = ms.coerceIn(ServoConstants.RAMP_SPAN_MIN_MS, ServoConstants.RAMP_SPAN_MAX_MS)
-        ramp.ratePerMs = ServoConstants.rateForSpan(v)
         ble.writeRampSpan(v)
         usbLink.writeRampSpan(v)
         viewModelScope.launch { store.setRampSpan(v) }
@@ -240,12 +244,25 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Online update (GitHub releases) ----------------------------------
 
+    /** Turn raw network exceptions into something a human can act on. */
+    private fun netErrorMessage(e: Throwable): String = when {
+        e is java.net.UnknownHostException ||
+            e.message?.contains("resolve host", ignoreCase = true) == true ->
+            "Keine Internetverbindung erreichbar (DNS). Bitte WLAN/Mobilfunk prüfen — " +
+                "im Heimnetz ggf. Pi-hole/Firewall."
+        e is java.net.SocketTimeoutException ->
+            "Zeitüberschreitung — Server nicht erreichbar. Internetverbindung prüfen."
+        e is java.net.ConnectException || e is java.io.IOException ->
+            "Keine Verbindung zum Server. Internetverbindung prüfen."
+        else -> e.message ?: "Unbekannter Fehler."
+    }
+
     /** Query the repo for the latest published release. */
     fun checkForUpdates() = viewModelScope.launch {
         _ui.update { it.copy(update = UpdateState.Checking) }
         runCatching { updateRepo.fetchLatest() }
             .onSuccess { rel -> _ui.update { it.copy(update = UpdateState.Latest(rel)) } }
-            .onFailure { e -> _ui.update { it.copy(update = UpdateState.Error(e.message ?: "Update-Prüfung fehlgeschlagen.")) } }
+            .onFailure { e -> _ui.update { it.copy(update = UpdateState.Error(netErrorMessage(e))) } }
     }
 
     /** Download the release firmware .bin and flash it over the live transport. */
@@ -266,7 +283,7 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.update { it.copy(update = UpdateState.Downloading("Firmware", pct)) }
             }
         }.getOrElse { e ->
-            _ui.update { it.copy(update = UpdateState.Error(e.message ?: "Firmware-Download fehlgeschlagen.")) }
+            _ui.update { it.copy(update = UpdateState.Error(netErrorMessage(e))) }
             return@launch
         }
         // Reset the update banner; the existing flash flow (ota / usbFlash) now
@@ -292,7 +309,7 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.update { it.copy(update = UpdateState.Downloading("App", pct)) }
             }
         }.getOrElse { e ->
-            _ui.update { it.copy(update = UpdateState.Error(e.message ?: "App-Download fehlgeschlagen.")) }
+            _ui.update { it.copy(update = UpdateState.Error(netErrorMessage(e))) }
             return@launch
         }
         val err = apkInstaller.install(bytes)
@@ -340,7 +357,6 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     fun disconnect() = ble.disconnect()
 
     override fun onCleared() {
-        ramp.stop()
         ble.disconnect()
         usbLink.disconnect()
         super.onCleared()

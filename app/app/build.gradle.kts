@@ -12,8 +12,8 @@ android {
         applicationId = "de.pflueger.servotester"
         minSdk = 26          // BLE + runtime permissions; API 31+ path handled separately
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.5"   // 1.2: USB flashing; 1.3: USB control; 1.4: firmware handshake; 1.5: speed slider + online update
+        versionCode = 7
+        versionName = "1.6"   // 1.4: fw handshake; 1.5: speed slider + online update; 1.6: dial folgt Servo (Sync) + klare Netzfehler
         vectorDrawables { useSupportLibrary = true }
     }
 
