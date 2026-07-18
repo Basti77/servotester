@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Matches the ESP32-C3's built-in USB-Serial/JTAG bridge (VID 0x303A / PID 0x1001,
+  = decimal 12346 / 4097; the manifest device filter wants decimal). Attaching a
+  matching device launches/foregrounds the app AND auto-grants USB permission for
+  that device, so the wired link can come up without the permission dialog.
+  Keep in sync with CdcAcmPort.isEspUsbSerialJtag.
+-->
+<resources>
+    <usb-device vendor-id="12346" product-id="4097" />
+</resources>

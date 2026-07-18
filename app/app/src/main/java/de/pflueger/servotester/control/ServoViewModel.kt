@@ -1,7 +1,13 @@
 package de.pflueger.servotester.control
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbManager
 import android.net.Uri
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import de.pflueger.servotester.ble.BleManager
@@ -73,6 +79,16 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     private val usbLink = UsbControlLink(app, debug)
     private val updateRepo = UpdateRepository()
     private val apkInstaller = ApkInstaller(app)
+
+    // Auto-connect over USB: bring the wired link up on its own whenever the ESP's
+    // USB-Serial/JTAG device shows up — plugged in while the app runs (this
+    // receiver), or already present at launch (checked in init). Attaching via the
+    // manifest device filter also auto-grants USB permission, so no dialog then.
+    private val usbAttachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) autoConnectUsb()
+        }
+    }
 
     private val _ui = MutableStateFlow(ServoUiState())
     val ui: StateFlow<ServoUiState> = _ui.asStateFlow()
@@ -197,6 +213,16 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
                 lastRemoteForResync = remote
             }
         }
+
+        // Listen for the ESP being plugged in while the app is running, and try
+        // once for a device that's already attached at launch (covers the app
+        // being started by the USB-attach intent).
+        ContextCompat.registerReceiver(
+            app, usbAttachReceiver,
+            IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED),
+            ContextCompat.RECEIVER_EXPORTED,   // system broadcast
+        )
+        autoConnectUsb()
     }
 
     // ---- Value control ----------------------------------------------------
@@ -411,6 +437,16 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(usbConnError = err) }
     }
 
+    /**
+     * Auto-connect the wired link when the ESP is on the bus. Guarded so it only
+     * fires for our actual device (ignores unrelated USB gear) and never fights an
+     * existing link, a flash in progress, or a running BLE session.
+     */
+    fun autoConnectUsb() {
+        if (_ui.value.usbConnected) return
+        if (_ui.value.usbFlash is UsbFlashState.Idle && usbLink.espPresent()) connectUsb()
+    }
+
     fun disconnectUsb() = usbLink.disconnect()
 
     fun connect(device: ScannedDevice) = viewModelScope.launch {
@@ -421,6 +457,7 @@ class ServoViewModel(app: Application) : AndroidViewModel(app) {
     fun disconnect() = ble.disconnect()
 
     override fun onCleared() {
+        runCatching { getApplication<Application>().unregisterReceiver(usbAttachReceiver) }
         ble.disconnect()
         usbLink.disconnect()
         super.onCleared()

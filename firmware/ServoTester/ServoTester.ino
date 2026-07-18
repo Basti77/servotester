@@ -7,8 +7,10 @@
  * stay in sync with the app's ServoUuids.kt.
  *
  * Features
- *  - PWM on GPIO 2 via LEDC, 50 Hz, 14-bit. Output is SILENT at boot
- *    (no pulses) until the app/MQTT enables it.
+ *  - PWM on GPIO 2 via LEDC, 50 Hz, 14-bit. Every boot centers to 1500 µs
+ *    with the output ON, so the servo drives straight to neutral on power-up
+ *    (v1.4.0: the last position is no longer restored — a servo powered up at
+ *    an endstop stresses the gears; only the ramp-speed preference persists).
  *  - The ramp ("Smooth Transit") is authoritative HERE: every target is
  *    slew-rate limited to RAMP_RATE_US_PER_MS (full 700..2300 span in 2 s).
  *  - BLE (NimBLE) GATT server, service UUID advertised so the app's scan
@@ -60,7 +62,7 @@
 
 // ---- Identity ---------------------------------------------------------
 
-static const char *FW_VERSION = "1.3.0";
+static const char *FW_VERSION = "1.4.0";
 static const char *BLE_NAME   = "ServoTester";
 
 // ---- Servo domain (keep in sync with app ServoConstants.kt) ------------
@@ -139,16 +141,15 @@ static volatile bool mqttConfigDirty = false;
 static volatile bool rebootPending   = false;
 static uint32_t      rebootAtMs      = 0;
 
-// Servo-state persistence: remember the last position + output across power
-// cycles, so after unplug/replug the servo re-engages where it was left
-// instead of snapping to a hardcoded center. Written back debounced (only once
-// motion has settled) to spare the flash from the per-frame ramp stream.
+// Boot policy: we deliberately do NOT restore the last position/output across
+// power cycles (dropped in v1.4.0). A servo that powers up already commanded to
+// an endstop is bad for the gears — so every boot centers to 1500 and drives it
+// (see loadServoState()). Only the ramp-speed preference is persisted, debounced
+// so the per-frame ramp stream never hammers the flash.
 static volatile bool  servoStateDirty     = false;
 static uint32_t       lastServoChangeMs   = 0;
 static const uint32_t SERVO_SAVE_DELAY_MS = 1500;
-static uint16_t       savedUs             = CENTER_US;  // last value in NVS
-static bool           savedOut            = false;
-static uint16_t       savedSpan           = RAMP_SPAN_DEF_MS;
+static uint16_t       savedSpan           = RAMP_SPAN_DEF_MS;  // last span in NVS
 
 // OTA session
 static volatile bool otaActive   = false;
@@ -291,7 +292,6 @@ static void setTarget(int us) {
   dbg("rx PWM %u (Ziel war %u)%s", (unsigned)v, (unsigned)targetUs,
       outputOn ? "" : " [Ausgang AUS]");
   targetUs = v;
-  markServoDirty();
 }
 
 static void setOutput(bool on) {
@@ -301,7 +301,6 @@ static void setOutput(bool on) {
   notifyState();
   publishMqttState(false, true);
   dbg("Ausgang %s @ %u µs", on ? "AN" : "AUS", (unsigned)lroundf(currentUs));
-  markServoDirty();
 }
 
 static void setRampSpan(int ms) {
@@ -363,33 +362,33 @@ static void saveMqttConfig() {
 
 // ---- Servo-state persistence ----------------------------------------------
 
-/** Restore the last position + output state saved before the last power-down. */
+/*
+ * Boot state. The position/output are intentionally NOT restored: every power-up
+ * centers to 1500 with the output ON, so the servo drives straight to neutral
+ * instead of being commanded back to a stored endstop (which stresses the gears
+ * and is what the old s_us/s_out restore did). Only the ramp-speed preference
+ * survives a power cycle.
+ */
 static void loadServoState() {
   prefs.begin("servocfg", true);
-  targetUs   = clampUs(prefs.getUShort("s_us", CENTER_US));
-  outputOn   = prefs.getBool("s_out", false);
   rampSpanMs = (uint16_t)constrain(prefs.getUShort("s_span", RAMP_SPAN_DEF_MS),
                                    RAMP_SPAN_MIN_MS, RAMP_SPAN_MAX_MS);
   prefs.end();
-  currentUs  = (float)targetUs;  // no ramp on boot: we ARE at the restored value
-  savedUs    = targetUs;
-  savedOut   = outputOn;
+  targetUs   = CENTER_US;         // always neutral on boot
+  currentUs  = (float)CENTER_US;  // no ramp on boot: we ARE at center
+  outputOn   = true;              // drive it: servo actively centers on power-up
   savedSpan  = rampSpanMs;
 }
 
-/** Persist the current position + output + ramp speed. Called debounced from loop(). */
+/** Persist the ramp-speed preference. Called debounced from loop(). */
 static void saveServoState() {
   prefs.begin("servocfg", false);
-  prefs.putUShort("s_us", targetUs);
-  prefs.putBool  ("s_out", outputOn);
   prefs.putUShort("s_span", rampSpanMs);
   prefs.end();
-  savedUs   = targetUs;
-  savedOut  = outputOn;
   savedSpan = rampSpanMs;
 }
 
-/** Mark state changed; the debounce timer in loop() writes it once it settles. */
+/** Mark the span changed; the debounce timer in loop() writes it once it settles. */
 static void markServoDirty() {
   servoStateDirty   = true;
   lastServoChangeMs = millis();
@@ -712,16 +711,16 @@ void setup() {
   Serial.setTxTimeoutMs(0);   // never stall the ramp when no host is reading
   Serial.printf("\nServoTester FW %s\n", FW_VERSION);
 
-  // PWM output configured; starts LOW. The last position + output state are
-  // restored from NVS below, so after a power cycle the servo re-engages where
-  // it was left (v1.2.0) rather than snapping to a hardcoded center.
+  // PWM output configured; starts LOW. loadServoState() then sets the boot state
+  // to centered (1500) + output ON, so applyPwm() drives the servo straight to
+  // neutral — never to a stored endstop (v1.4.0: last position no longer saved).
   ledcAttach(SERVO_PIN, PWM_FREQ_HZ, PWM_RES_BITS);
   ledcWrite(SERVO_PIN, 0);
 
   loadConfig();
   loadServoState();
-  applyPwm();        // drive the restored position immediately if output was on
-  bleSetup();        // advertises the restored values via chPwm/chState
+  applyPwm();        // drive the neutral (1500) start position immediately
+  bleSetup();        // advertises the boot values (1500 / on) via chPwm/chState
   dbg("Boot FW %s — Ist %u µs, Ausgang %s, Tempo %u ms", FW_VERSION,
       (unsigned)targetUs, outputOn ? "AN" : "AUS", (unsigned)rampSpanMs);
 
@@ -733,13 +732,13 @@ void loop() {
   rampTick();
   serialTick();
 
-  // Persist servo position/output once motion has settled (debounced so the
-  // per-frame ramp stream doesn't hammer the flash). Skipped during OTA so we
-  // never store the deliberately-forced-off state from the update path.
+  // Persist the ramp-speed preference once it settles (debounced). Position and
+  // output are intentionally not stored — every boot centers to 1500 (see
+  // loadServoState). Skipped during OTA.
   if (servoStateDirty && !otaActive &&
       millis() - lastServoChangeMs >= SERVO_SAVE_DELAY_MS) {
     servoStateDirty = false;
-    if (targetUs != savedUs || outputOn != savedOut || rampSpanMs != savedSpan) saveServoState();
+    if (rampSpanMs != savedSpan) saveServoState();
   }
 
   // Deferred actions from BLE callbacks.

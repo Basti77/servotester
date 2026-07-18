@@ -1,5 +1,7 @@
 package de.pflueger.servotester
 
+import android.content.Intent
+import android.hardware.usb.UsbManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -30,5 +32,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // Re-attaching the ESP re-delivers the USB-attach intent here (singleTop).
+    // The VM's runtime receiver usually catches it too; this makes the wired
+    // auto-connect fire reliably when the app was brought to front by the plug-in.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) viewModel.autoConnectUsb()
     }
 }

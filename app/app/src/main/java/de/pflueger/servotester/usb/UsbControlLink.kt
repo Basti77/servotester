@@ -67,6 +67,9 @@ class UsbControlLink(private val context: Context, private val debug: DebugLog) 
 
     private val txQueue = Channel<String>(capacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
+    /** True if the ESP32-C3's USB-Serial/JTAG device is currently on the bus. */
+    fun espPresent(): Boolean = UsbAccess.findEsp(usb) != null
+
     /** @return null on success, or a user-displayable error message. */
     suspend fun connect(scope: CoroutineScope): String? = withContext(Dispatchers.IO) {
         if (_connected.value) return@withContext null
